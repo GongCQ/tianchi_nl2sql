@@ -191,11 +191,16 @@ class MultiSentenceTokenizer(Tokenizer):
     SPACE_TOKEN = '[unused1]'
 
     def _tokenize(self, text):
+        '''
+        [gcq]
+        对字符串作一些基本的清洗，如把空格、缩进、换行统一替换为“空白”标签，把未知字符统一替换为“未知”标签；
+        不存在于self._token_dict中的字符都算未知字符，这个字典包含2万多个字符；
+        这里还没有把字符转换为整数表示的id'''
         r = []
         for c in text.lower():
             if c in self._token_dict:
                 r.append(c)
-            elif self._is_space(c):
+            elif self._is_space(c):  # 包括空格、缩进、换行等空白字符
                 r.append(self.SPACE_TOKEN)
             else:
                 r.append(self._token_unk)
@@ -219,7 +224,7 @@ class MultiSentenceTokenizer(Tokenizer):
 
     def encode(self, first_sent, *rest_sents):
         tokens, tokens_lens = self.tokenize(first_sent, *rest_sents)
-        token_ids = self._convert_tokens_to_ids(tokens)
+        token_ids = self._convert_tokens_to_ids(tokens)  # 字符转化为整数形式的id，方法在keras_bert的Tokenizer类中
         segment_ids = ([0] * tokens_lens[0]) + [1] * sum(tokens_lens[1:])
         return token_ids, segment_ids
 

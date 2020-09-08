@@ -28,14 +28,14 @@ from keras.utils import multi_gpu_model
 # In[ ]:
 
 
-train_table_file = '../data/train.tables.json'
-train_data_file = '../data/train.json'
+train_table_file = '../data/train/train.tables.json'
+train_data_file = '../data/train/train.json'
 
-val_table_file = '../data/val.tables.json'
-val_data_file = '../data/val.json'
+val_table_file = '../data/val/val.tables.json'
+val_data_file = '../data/val/val.json'
 
-test_table_file = '../data/test.tables.json'
-test_data_file = '../data/test.json'
+test_table_file = '../data/test/test.tables.json'
+test_data_file = '../data/test/test.json'
 
 # Download pretrained BERT model from https://github.com/ymcui/Chinese-BERT-wwm
 bert_model_path = '../model/chinese_wwm_L-12_H-768_A-12'
@@ -118,10 +118,10 @@ def load_json(json_file):
 class QuestionCondPair:
     def __init__(self, query_id, question, cond_text, cond_sql, label):
         self.query_id = query_id
-        self.question = question
-        self.cond_text = cond_text
-        self.cond_sql = cond_sql
-        self.label = label
+        self.question = question # 查询文本
+        self.cond_text = cond_text # 拼凑出来的查询条件的文本形式，如“影片名称是密室逃生”
+        self.cond_sql = cond_sql # cond_text对应的sql形式
+        self.label = label # 拼凑出的查询条件cond_sql是否真的出现在正确的查询条件中
 
     def __repr__(self):
         repr_str = ''
@@ -140,7 +140,7 @@ class NegativeSampler:
     def __init__(self, neg_sample_ratio=10):
         self.neg_sample_ratio = neg_sample_ratio
     
-    def sample(self, data):
+    def sample(self, data): # data是一个QuestionCondPairsDataset对象
         positive_data = [d for d in data if d.label == 1]
         negative_data = [d for d in data if d.label == 0]
         negative_sample = random.sample(negative_data, 
@@ -153,7 +153,7 @@ class FullSampler:
     不抽样，返回所有的 pairs
     
     """
-    def sample(self, data):
+    def sample(self, data): # data是一个QuestionCondPairsDataset对象
         return data
 
 class CandidateCondsExtractor:
@@ -179,12 +179,13 @@ class CandidateCondsExtractor:
                 if col_type == 'text':
                     cond_values = value_in_column
                 elif col_type == 'real':
-                    if len(value_in_column) == 1: 
+                    if len(value_in_column) == 1: # 这是什么原理？从列里面匹配到了唯一值，才认为它是一个值？
                         cond_values = value_in_column + value_in_question
                     else:
                         cond_values = value_in_question
                 cache_key = self.get_cache_key(query_id, query, col_id)
                 self.cache[cache_key].update(cond_values)
+            ddd = 0
         self._cached = True
     
     def get_cache_key(self, query_id, query, col_id):
@@ -230,10 +231,10 @@ class CandidateCondsExtractor:
    
     def extract_values_from_column(self, query, col_ids):
         question = query.question.text
-        question_chars = set(query.question.text)
-        unique_col_values = set(query.table.df.iloc[:, col_ids].astype(str))
-        select_col_values = [v for v in unique_col_values 
-                             if (question_chars & set(v))]
+        question_chars = set(query.question.text)  # 查询文本中的所有字符集合
+        unique_col_values = set(query.table.df.iloc[:, col_ids].astype(str))  # 该列中的所有值构成的集合
+        select_col_values = [v for v in unique_col_values
+                             if (question_chars & set(v))] # 列里面的值和查询文本有重合的字符，才认为该值是一个value
         return select_col_values
     
     
@@ -256,7 +257,7 @@ class QuestionCondPairsDataset:
     
     def __init__(self, queries, candidate_extractor, has_label=True, model_1_outputs=None):
         self.candidate_extractor = candidate_extractor
-        self.has_label = has_label
+        self.has_label = has_label  # 如果是训练集，has_label为True，如果是测试集则为False
         self.model_1_outputs = model_1_outputs
         self.data = self.build_dataset(queries)
         
@@ -293,11 +294,11 @@ class QuestionCondPairsDataset:
         for value in values:
             for op_pattern in op_patterns:
                 cond = op_pattern['pattern'].format(col_name=col_name, value=value)
-                cond_sql = (col_id, op_pattern['cond_op_idx'], value)
+                cond_sql = (col_id, op_pattern['cond_op_idx'], value)  # 拼凑出一个查询条件
                 real_sql = {}
                 if self.has_label:
-                    real_sql = {tuple(c) for c in query.sql.conds}
-                label = 1 if cond_sql in real_sql else 0
+                    real_sql = {tuple(c) for c in query.sql.conds} # real_sql是一个集合，集合里面的元素是tuple类型
+                label = 1 if cond_sql in real_sql else 0 # 拼凑出的查询条件是否真的出现在正确的查询条件中
                 pair = QuestionCondPair(query_id, query.question.text,
                                         cond, cond_sql, label)
                 pairs.append(pair)
@@ -351,10 +352,14 @@ def construct_model(paths, use_multi_gpus=False):
     for l in bert_model.layers:
         l.trainable = True
 
+    # x1是查询文本，
+    # x2是拼凑出来的查询条件的文本形式，如“影片名称是密室逃生”，见QuestionCondPair中的cond_text字段
+    # y是“x2是x1中包含的查询条件“的概率
+    # x1、x2、y都在QuestionCondPairsDataseq类的__getitem__方法中构造
     x1_in = Input(shape=(None,), name='input_x1', dtype='int32')
     x2_in = Input(shape=(None,), name='input_x2')
     x = bert_model([x1_in, x2_in])
-    x_cls = Lambda(lambda x: x[:, 0])(x)
+    x_cls = Lambda(lambda x: x[:, 0])(x)  # 取bert输出序列的第1个元素
     y_pred = Dense(1, activation='sigmoid', name='output_similarity')(x_cls)
 
     model = Model([x1_in, x2_in], y_pred)
@@ -383,14 +388,14 @@ model, tokenizer = construct_model(paths)
 class QuestionCondPairsDataseq(Sequence):
     def __init__(self, dataset, tokenizer, is_train=True, max_len=120, 
                  sampler=None, shuffle=False, batch_size=32):
-        self.dataset = dataset
-        self.tokenizer = tokenizer
+        self.dataset = dataset # QuestionCondPairsDataset类型，遍历它，得到的元素是QuestionCondPair类型
+        self.tokenizer = tokenizer # SimpleTokenizer类型，只是把字符串作一些简单的替换，比如将换行符、空格、缩进统一替换为空白符，未知字符统一替换为unknown
         self.is_train = is_train
         self.max_len = max_len
         self.sampler = sampler
         self.shuffle = shuffle
         self.batch_size = batch_size
-        self.on_epoch_end()       
+        self.on_epoch_end()  # 这里面初始化了self.data
     
     def _pad_sequences(self, seqs, max_len=None):
         return pad_sequences(seqs, maxlen=max_len, padding='post', truncating='post')
@@ -421,7 +426,7 @@ class QuestionCondPairsDataseq(Sequence):
             return inputs
                     
     def on_epoch_end(self):
-        self.data = self.sampler.sample(self.dataset)
+        self.data = self.sampler.sample(self.dataset) # 本来是负样本远多于正样本，为了使正样本不被负样本淹没，需要采样舍弃掉部分负样本，使得负样本与正样本的比例维持在合理范围内，比如负样本数量是正样本的10倍。
         self.global_indices = np.arange(len(self.data))
         if self.shuffle:
             np.random.shuffle(self.global_indices)

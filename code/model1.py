@@ -5,6 +5,7 @@
 
 
 import os
+# os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 import re
 import json
 import math
@@ -24,6 +25,8 @@ from keras.utils import multi_gpu_model
 from nl2sql.utils import read_data, read_tables, SQL, MultiSentenceTokenizer, Query, Question, Table
 from nl2sql.utils.optimizer import RAdam
 
+# import tensorflow as tf
+# print('~~ gpu available: %s' % tf.test.is_available())
 
 # ## Configuration
 
@@ -129,7 +132,7 @@ class QueryTokenizer(MultiSentenceTokenizer):
         if col_orders is None:
             col_orders = np.arange(len(query.table.header))
         
-        header = [query.table.header[i] for i in col_orders]
+        header = [query.table.header[i] for i in col_orders] # 把列名混乱顺序
         
         for col_name, col_type in header:
             col_type_token = self.col_type_token_dict[col_type]
@@ -183,6 +186,9 @@ class SqlLabelEncoder:
                 sel_agg_label[col_id] = agg_op
             
         cond_op_label = np.ones(num_cols, dtype='int32') * len(SQL.op_sql_dict)
+        # sql.conds中的元素都是长度为3的list（代表一个查询条件），
+        # 第1个元素col_id是查询条件中的条件列名，第2个元素cond_op是逻辑运算符，第三个元素是条件值，这里直接不要条件值是啥意思？？？
+        # 条件值在model2里面预测，看readme中的“方案介绍”部分。。。
         for col_id, cond_op, _ in sql.conds:
             if col_id < num_cols:
                 cond_op_label[col_id] = cond_op
@@ -247,7 +253,7 @@ class DataSequence(Sequence):
                  label_encoder, 
                  is_train=True, 
                  max_len=160, 
-                 batch_size=32, 
+                 batch_size=32,
                  shuffle=True, 
                  shuffle_header=True, 
                  global_indices=None):
@@ -293,11 +299,16 @@ class DataSequence(Sequence):
             col_orders = np.arange(len(table.header))
             if self.shuffle_header:
                 np.random.shuffle(col_orders)
-            
+
+            # token_ids是把查询文本和列名（包含列的数据类型）拼接到一起，中间用预先定义的分隔符隔开。
+            # header_ids是列名在token_ids中的起始位置，其长度等于列的数量。
+            # segment_ids好像是全0，长度与token_ids相同（似乎是用于标记当前位置是否为分词位置的？但这里并没有用到分词，所以全0？）
+            # 不管是查询文本还是列名，都视作字符序列，而不用分词。
+            # 字符转化为整数形式的id，方法在keras_bert的Tokenizer类中
             token_ids, segment_ids, header_ids = self.tokenizer.encode(query, col_orders)
-            header_ids = [hid for hid in header_ids if hid < self.max_len]
-            header_mask = [1] * len(header_ids)
-            col_orders = col_orders[: len(header_ids)]
+            header_ids = [hid for hid in header_ids if hid < self.max_len]  # 截断超长部分
+            header_mask = [1] * len(header_ids) # 一个长度等于列数的全1的向量，用于构造batch填充后作为掩码
+            col_orders = col_orders[: len(header_ids)]  # 跟随header_ids的长度，如果header_ids因为超长被截断一部分，这里col_orders也同样截断
             
             TOKEN_IDS.append(token_ids)
             SEGMENT_IDS.append(segment_ids)
@@ -307,7 +318,10 @@ class DataSequence(Sequence):
             if not self.is_train:
                 continue
             sql = query.sql
-            
+
+            # cond_conn_op是一个整数，表示查询条件之间的连接符号，0表示没有连接符号（即只有0个或1个查询条件），1表示and，2表示or（由这种表达方式可知，最多只能有2个查询条件）
+            # sel_agg是一个list，长度为表的列数，这个list的元素为整数，表示各列是否出现在select子句中以及对应的聚合函数，0表示select子句中有这个列但没有聚合函数，1～5分别表示有这个列且对应聚合函数为avg、max、min、count、sum，6表示没有这个列。
+            # cond_op是一个list，长度为表的列数，这个list的元素为整数，表示各列是否出现在查询条件中以及对应的逻辑运算符，0～3分别表示查询条件中有这个列且对应的逻辑运算符分别为 >、<、==、!=，4表示没有这个列
             cond_conn_op, sel_agg, cond_op = self.label_encoder.encode(sql, num_cols=len(table.header))
             
             sel_agg = sel_agg[col_orders]
@@ -356,12 +370,12 @@ class DataSequence(Sequence):
 # In[18]:
 
 
-train_seq = DataSequence(train_data, query_tokenizer, label_encoder, shuffle=False, max_len=160, batch_size=2)
+train_seq = DataSequence(train_data, query_tokenizer, label_encoder, shuffle=False, max_len=160, batch_size=32)
 
 
 # In[19]:
 
-
+train_seq.is_train = True
 sample_batch_inputs, sample_batch_outputs = train_seq[0]
 for name, data in sample_batch_inputs.items():
     print('{} : shape{}'.format(name, data.shape))
@@ -398,28 +412,33 @@ def seq_gather(x):
 bert_model = load_trained_model_from_checkpoint(paths.config, paths.checkpoint, seq_len=None)
 for l in bert_model.layers:
     l.trainable = True
-    
+
+# Input 这个方法似乎会默认在你指定的shape前面再加一个None的维度，比如你指定shape为(3,4)，那么实际上创建的tensor的维度为(None, 3, 4)，可能是需要默认创建batch维度
 inp_token_ids = Input(shape=(None,), name='input_token_ids', dtype='int32')
 inp_segment_ids = Input(shape=(None,), name='input_segment_ids', dtype='int32')
 inp_header_ids = Input(shape=(None,), name='input_header_ids', dtype='int32')
 inp_header_mask = Input(shape=(None, ), name='input_header_mask')
 
-x = bert_model([inp_token_ids, inp_segment_ids]) # (None, seq_len, 768)
+x = bert_model([inp_token_ids, inp_segment_ids]) # (None, seq_len, 768)  # x的这三个维度，None是batch维度，seq_len是序列维度，768是bert输出的embedding的长度？？？
 
-# predict cond_conn_op
+# predict cond_conn_op。预测条件连接符
+# x有三个维度，下面x[:, 0]这样的写法是对前两个维度进行索引，相当于x[:, 0, :]
+# 从bert的输出序列中只取第一个元素用于条件连接符预测
 x_for_cond_conn_op = Lambda(lambda x: x[:, 0])(x) # (None, 768)
 p_cond_conn_op = Dense(num_cond_conn_op, activation='softmax', name='output_cond_conn_op')(x_for_cond_conn_op)
 
-# predict sel_agg
+# predict sel_agg。预测查询列及聚合函数
+# 下面这个这里应用seq_gather方法（其中用到batch_gather方法），使得bert输出序列中，只有对应于列名起始位置的元素被应用到预测查询列及聚合函数中，这样处理后，列名的长度（列名包含的字符数）就不再是一个变量。
 x_for_header = Lambda(seq_gather, name='header_seq_gather')([x, inp_header_ids]) # (None, h_len, 768)
-header_mask = Lambda(lambda x: K.expand_dims(x, axis=-1))(inp_header_mask) # (None, h_len, 1)
+header_mask = Lambda(lambda x: K.expand_dims(x, axis=-1))(inp_header_mask) # (None, h_len, 1) # h_len 是列数
 
-x_for_header = Multiply()([x_for_header, header_mask])
+x_for_header = Multiply()([x_for_header, header_mask])  # 逐元素相乘
 x_for_header = Masking()(x_for_header)
 
 p_sel_agg = Dense(num_sel_agg, activation='softmax', name='output_sel_agg')(x_for_header)
 
-x_for_cond_op = Concatenate(axis=-1)([x_for_header, p_sel_agg])
+# 预测条件列及逻辑运算符
+x_for_cond_op = Concatenate(axis=-1)([x_for_header, p_sel_agg]) # 把预测查询列及聚合函数得到的概率，和bert输出的对应列的embedding拼接到一起
 p_cond_op = Dense(num_cond_op, activation='softmax', name='output_cond_op')(x_for_cond_op)
 
 
@@ -428,11 +447,9 @@ model = Model(
     [p_cond_conn_op, p_sel_agg, p_cond_op]
 )
 
-
 # In[23]:
 
-
-NUM_GPUS = 2
+NUM_GPUS = 1
 if NUM_GPUS > 1:
     print('using {} gpus'.format(NUM_GPUS))
     model = multi_gpu_model(model, gpus=NUM_GPUS)
@@ -443,6 +460,8 @@ model.compile(
     loss='sparse_categorical_crossentropy',
     optimizer=RAdam(lr=learning_rate)
 )
+
+print('~~ model.compile completed...')
 
 
 # ## Training Models
@@ -587,8 +606,9 @@ callbacks = [
 
 # In[27]:
 
-
+print('~~ model.fit_generator begin ...')
 history = model.fit_generator(train_dataseq, epochs=num_epochs, callbacks=callbacks)
+print('~~ model.fit_generator completed...')
 
 
 # In[28]:
@@ -617,22 +637,21 @@ test_dataseq = DataSequence(
 # In[30]:
 
 
-pred_sqls = []
+for tag, ds in [('train', train_dataseq), ('test', test_dataseq), ('val', val_dataseq)]:
+    pred_sqls = []
+    for batch_data in tqdm(ds):
+        header_lens = np.sum(batch_data['input_header_mask'], axis=-1)
+        preds_cond_conn_op, preds_sel_agg, preds_cond_op = model.predict_on_batch(batch_data)
+        sqls = outputs_to_sqls(preds_cond_conn_op, preds_sel_agg, preds_cond_op,
+                               header_lens, val_dataseq.label_encoder)
+        pred_sqls += sqls
 
-for batch_data in tqdm(test_dataseq):
-    header_lens = np.sum(batch_data['input_header_mask'], axis=-1)
-    preds_cond_conn_op, preds_sel_agg, preds_cond_op = model.predict_on_batch(batch_data)
-    sqls = outputs_to_sqls(preds_cond_conn_op, preds_sel_agg, preds_cond_op, 
-                           header_lens, val_dataseq.label_encoder)
-    pred_sqls += sqls
+    # In[31]:
 
 
-# In[31]:
-
-
-task1_output_file = 'task1_output.json'
-with open(task1_output_file, 'w') as f:
-    for sql in pred_sqls:
-        json_str = json.dumps(sql, ensure_ascii=False)
-        f.write(json_str + '\n')
+    task1_output_file = 'task1_output_%s.json' % tag
+    with open(task1_output_file, 'w') as f:
+        for sql in pred_sqls:
+            json_str = json.dumps(sql, ensure_ascii=False)
+            f.write(json_str + '\n')
 
