@@ -352,9 +352,9 @@ def construct_model(paths, use_multi_gpus=False):
     for l in bert_model.layers:
         l.trainable = True
 
-    # x1是查询文本，
-    # x2是拼凑出来的查询条件的文本形式，如“影片名称是密室逃生”，见QuestionCondPair中的cond_text字段
-    # y是“x2是x1中包含的查询条件“的概率
+    # x1是QuestionCondPair的question字段和cond_text字段的拼接。x2是拼接的segment_ids。x2的长度和x1一样。在x2中，对应于x1中question的位置为0,对应于x1中cond_text的位置为1
+    # （question是查询文本，cond_text是拼凑出来的查询条件的文本形式，如“影片名称是密室逃生”）
+    # y是“cond_text是question中包含的查询条件“的概率
     # x1、x2、y都在QuestionCondPairsDataseq类的__getitem__方法中构造
     x1_in = Input(shape=(None,), name='input_x1', dtype='int32')
     x2_in = Input(shape=(None,), name='input_x2')
@@ -395,7 +395,7 @@ class QuestionCondPairsDataseq(Sequence):
         self.sampler = sampler
         self.shuffle = shuffle
         self.batch_size = batch_size
-        self.on_epoch_end()  # 这里面初始化了self.data
+        self.on_epoch_end()  # 这里面初始化了self.data，self.data是包含QuestionCondPair类型元素的list，在self.dataset的基础上经过采样，随机舍弃一些负样本
     
     def _pad_sequences(self, seqs, max_len=None):
         return pad_sequences(seqs, maxlen=max_len, padding='post', truncating='post')
@@ -407,7 +407,9 @@ class QuestionCondPairsDataseq(Sequence):
         X1, X2 = [], []
         Y = []
         
-        for data in batch_data:
+        for data in batch_data: # data是QuestionCondPair类型
+            # self.tokenizer是SimpleTokenizer类型，继承自keras_bert.tokenizer.Tokenizer类型
+            # self.tokenizer.encode是keras_bert.tokenizer.Tokenizer里的方法，将first和second两个输入拼接到一起，返回的x1是拼接后的序列，x2则是segment_ids（也就是bert模型的第二个输入）,
             x1, x2 = self.tokenizer.encode(first=data.question.lower(), 
                                            second=data.cond_text.lower())
             X1.append(x1)
